@@ -5578,5 +5578,203 @@ setwd("/Users/mariacandelariabergero/Library/CloudStorage/GoogleDrive-cande.berg
     ggsave("figures/paper_figures/V3/SM21.boxplot_cumulative_energy_CO2_removals_2020_2100.png", width = 6, height = 6, units = "in", dpi = 600)
     ggsave("figures/paper_figures/V3/SM21.boxplot_cumulative_energy_CO2_removals_2020_2100.svg", width = 6, height = 6, units = "in", dpi = 600)
     
+#-------------------------------------------------- SUPPLEMENTARY FIGURE 22 ------------------------------------------------------------------------------------------------------- 
+    #Make figure for net-zero CO2 emissions year
+    #### 1. Prepare data ####
+    original_emissions <- read_csv("/Users/mariacandelariabergero/python/gegca-prototype/data/raw/interim/15849b8/V3/original/scenarios-infilled_all.csv") %>% mutate(underdelivery_percent = 0)
+    
+    # Define the base file path
+    base_path <- "/Users/mariacandelariabergero/python/gegca-prototype/data/raw/interim/15849b8/V4/underdeliver_allCDR/"
+    
+    # Define percentages (10 to 100 in steps of 10)
+    percentages <- seq(10, 100, by = 10)
+    
+    # Read in all files and combine them
+    all_data <- map_dfr(percentages, function(pct) {
+      file_path <- paste0(base_path, pct, "/scenarios-infilled_all_underdelivered_", pct, "percent.csv")
+      # Read file and add a column to track the percentage
+      read_csv(file_path) %>%
+        mutate(underdelivery_percent = pct)
+    })
+    
+    #Merge all data 2015-2100
+    original_emissions %>% #Original emissions
+      bind_rows(all_data) %>% #under-delivering 10-100% every 10%
+      gather(year, value, -model, -scenario, -region, -variable, -unit, -underdelivery_percent) %>%
+      mutate(year = substr(year, 1, 4)) %>% #clean year column
+      mutate(year = as.numeric(year)) %>%
+      left_join(C_paths, by = c("scenario" = "Scenario", "model" = "Model")) %>%
+      unite(Model_Scenario, c(model, scenario), sep = "_", remove = FALSE) %>%
+      left_join(AR6_GWP, by = "variable")%>% #Bring in multipliers GWP 100 years from IPCC AR6
+      filter(!is.na(GWP_100))%>% #Filter out BC, CO, NH3, NOx, OC, SUlfur and VOC (not GHGs)
+      select(-Notes) %>%
+      mutate(value = ifelse(grepl("kt", unit), value / 1000, value)) %>% #Convert gases in kilo ton to Mega ton
+      mutate(value_CO2eq = value * GWP_100) %>%
+      group_by(Model_Scenario, model, scenario, region, year, Path, GHG, underdelivery_percent) %>%
+      summarise(sum = sum(value_CO2eq)) %>%
+      ungroup() %>%
+      mutate(unit = "MtCO2eq")-> underdelivering_all_gases
+    
+    #Add all GHGs
+    #First history 2010-2015
+    history_ar6 %>%
+      select(Variable, Unit, `2010`,`2011`,`2012`,`2013`,`2014`, `2015`) %>%
+      #Prepare variabels for join
+      separate(Variable, c("AR6", "emissions", "Variable", "harmonized", "other"), sep = "\\|") %>%
+      mutate(joined_column = if_else(is.na(other), paste(emissions, Variable, sep = "|"), 
+                                     paste(emissions, Variable, harmonized, sep = "|"))) %>%
+      select(-AR6, -emissions, -Variable, -harmonized, -other) %>%
+      rename(variable = joined_column) %>%
+      gather(year, value, -variable, -Unit) %>%
+      left_join(AR6_GWP, by = "variable") %>% #Bring in multipliers GWP 100 years from IPCC AR6
+      filter(!is.na(GWP_100))%>% #Filter out BC, CO, NH3, NOx, OC, SUlfur and VOC (not GHGs)
+      select(-Notes) %>%
+      mutate(value = ifelse(grepl("kt", Unit), value / 1000, value)) %>% #Convert gases in kilo ton to Mega ton
+      mutate(value_CO2eq = (value * GWP_100) / 1000, #convert to co2 equivalent, and ot Gt
+             Unit = "GtCO2eq",
+             year = as.numeric(year)) %>%
+      filter(!is.na(value)) %>% #filter out NAs in Emissions|HFC|HFC245ca
+      group_by(Unit, year, GHG) %>%
+      summarise(sum = sum(value_CO2eq)) %>%
+      ungroup() %>%
+      group_by(Unit, year) %>%
+      mutate(total_GHG = sum(sum)) %>%
+      ungroup() %>%
+      #Note: history_ar6 data does not have all non-CO2, so we ignore total for
+      #2015 and use under delivering_all_gases for this year (which has all those non-CO2. The issue is with f-gases)
+      mutate(total_GHG = if_else(year == 2015, 55.85171, total_GHG))-> history_ar6_fixed_GHG_2010_2015
+    
+    #Now modeled GHGs 2015-2100
+    underdelivering_all_gases %>%
+      group_by(Model_Scenario, model, scenario, region, year, Path, unit, underdelivery_percent) %>%
+      summarise(totalGHG = sum(sum)) %>%
+      ungroup() %>%
+      mutate(totalGHG = totalGHG / 1000,
+             unit = "GtCO2eq/yr")-> underdelivering_all_gases_total
+    #Note, these values are very similar to IPCC https://www.ipcc.ch/report/ar6/wg3/figures/summary-for-policymakers/figure-spm-1/
+    
+    #Only CO2
+    #bring in 2010 CO2
+    history_ar6 %>%
+      select(Variable, Unit, `2010`,`2011`,`2012`,`2013`,`2014`, `2015`) %>%
+      filter(Variable == "AR6 climate diagnostics|Emissions|CO2|Unharmonized") %>%
+      gather(year, value, -Variable, -Unit) %>%
+      mutate(year = as.numeric(year)) %>%
+      mutate(totalCO2 = value/ 1000,
+             unit = "GtCO2/yr") %>%
+      select(-Unit, -Variable)-> history_ar6_fixed_2010_2015
+    
+    #Modeled under-delivering capture
+    underdelivering_all_gases %>%
+      filter(GHG %in% c("CO2 (energy)", "CO2 (land)")) %>%
+      group_by(Model_Scenario, model, scenario, region, year, Path, unit, underdelivery_percent) %>%
+      summarise(totalCO2 = sum(sum)) %>%
+      ungroup()%>%
+      mutate(totalCO2 = totalCO2 / 1000,
+             unit = "GtCO2/yr")-> underdelivering_all_CO2
+    
+    #### 2. Find net-zero CO2 year####
+    underdelivering_all_CO2 %>%
+      group_by(Model_Scenario, model, scenario, region, Path, unit, underdelivery_percent) %>%    
+      mutate(
+        net_zero_year = ifelse(
+          any(totalCO2 < 0, na.rm = TRUE),   # Check if there is any negative value
+          year[which(totalCO2 < 0)[1]],      # Select the first year where CO2_emissions is negative
+          2101)) %>%
+      select(Model_Scenario, model, scenario, region, Path, unit, underdelivery_percent, net_zero_year) %>%
+      distinct() -> closest_to_zero_year
+  
+    #### 3. Plot ####
+    #Go to wide format
+    closest_to_zero_year %>%
+      #filter(underdelivery_percent %in% c(0, 100)) %>%
+      spread(underdelivery_percent, net_zero_year) %>%
+      mutate(year_diff = `100` - `0`)->closest_to_zero_year_wide
+    #Note that here year 2100 may mean the scenairo does not reach net zero by then
+    
+    median_diff_by_path <- closest_to_zero_year_wide %>%
+      group_by(Path) %>%
+      summarise(median_0_underdelivered = median(`0`, na.rm = TRUE),
+                median_100_underdelivered = median(`100`, na.rm = TRUE),
+                median_year_diff = median(year_diff, na.rm = TRUE)) %>%
+      arrange(Path)
 
+    closest_to_zero_year_wide_ordered <- closest_to_zero_year_wide %>%
+      group_by(Path) %>%
+      mutate(Model_Scenario = fct_reorder(Model_Scenario, `0`, .desc = FALSE)) %>%
+      ungroup()
+    
+    scenario_counts <- closest_to_zero_year_wide_ordered %>%
+      group_by(Path) %>%
+      summarise(n_scenarios = n_distinct(Model_Scenario))
+    
+    p<-ggplot(closest_to_zero_year_wide_ordered, aes(y = Model_Scenario, color = Path)) +
+      geom_segment(aes(x = `0`, xend = `100`, yend = Model_Scenario), 
+                   size = 1.2, alpha = 0.8) +
+      geom_point(aes(x = `0`), size = 2, shape = 1, fill = "white", stroke = 1.2) +
+      geom_point(aes(x = `100`), size = 2, shape = 16, fill = "white", stroke = 1.2) +
+      facet_wrap(~Path, scales = "free_y") +
+      scale_color_manual(values = colors) +
+      scale_fill_manual(values = colors) +
+      scale_x_continuous(breaks = seq(2030, 2101, by = 10), limits = c(2030, 2101)) +
+      labs(
+        title = "Net-zero year shift with underdelivery (Lollipop Plot)",
+        subtitle = "From 0% (hollow) to 100% (fill)",
+        x = "Year",
+        y = NULL
+      ) +
+      figure_theme +
+      theme(panel.background = element_rect(fill = "white"),
+            plot.background = element_rect(fill = "white"),
+            legend.position = "none",
+            axis.text.y = element_blank(),
+            axis.ticks.y = element_blank()) 
+    ggsave("figures/paper_figures/V3/SM22.netzero_emissions_year.png", p, width = 12, height = 12, units = "in", dpi = 600)
+    ggsave("figures/paper_figures/V3/SM22.netzero_emissions_year.svg", p, width = 12, height = 12, units = "in", dpi = 600)
+    
+    
+    
+    ###TEST with heatmap
+    # Step 1 — Create an ordering vector for Model_Scenario
+    model_order <- closest_to_zero_year %>%
+      filter(underdelivery_percent == 0) %>%
+      arrange(net_zero_year) %>%
+      pull(Model_Scenario)
+    
+    # Step 2 — Apply this ordering as a factor
+    closest_to_zero_year_heat <- closest_to_zero_year %>%
+      mutate(Model_Scenario = factor(Model_Scenario, levels = model_order))
+    
+    # Calculate median net-zero year per Path and underdelivery_percent
+    median_net_zero <- closest_to_zero_year %>%
+      group_by(Path, underdelivery_percent) %>%
+      summarise(median_net_zero_year = round(median(net_zero_year, na.rm = TRUE))) %>%
+      ungroup()
+    
+    median_net_zero %>%
+      spread(underdelivery_percent, median_net_zero_year) -> median_net_zero_wide
+    
+    # Step 3 — Make your plot
+    p_heatmap <- ggplot(closest_to_zero_year_heat, aes(x = underdelivery_percent, y = Model_Scenario, fill = net_zero_year)) +
+      geom_tile(color = "white", size = 0.1) +
+      facet_wrap(~Path, scales = "free_y") +
+      scale_fill_viridis_c(option = "magma", direction = -1, na.value = "grey90") +
+      labs(
+        title = "Net-zero year across underdelivery percentages",
+        x = "Underdelivery (%)",
+        y = NULL,
+        fill = "Net-zero year"
+      ) +
+      figure_theme +
+      theme(
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        axis.text.y = element_blank(),  # show text if desired!
+        axis.ticks.y = element_blank()
+      )
+    ggsave("figures/paper_figures/V3/SM22.netzero_emissions_year_all.png", p_heatmap, width = 12, height = 12, units = "in", dpi = 600)
+    ggsave("figures/paper_figures/V3/SM22.netzero_emissions_year_all.svg", p_heatmap, width = 12, height = 12, units = "in", dpi = 600)
+    
+    
+    
     
